@@ -2,6 +2,8 @@
 
 An interactive, agentic vision-language assistant for multimodal remote-sensing image analysis through natural-language queries. Built for the Indian Space Research Organisation (ISRO) / Space Applications Centre (SAC) evaluation benchmarks and AI challenges.
 
+<img style="width=100%;" src="architecture_diagram.png" />
+
 ---
 
 ## 🌟 Key Features & Novelty

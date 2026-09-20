@@ -1,3 +1,6 @@
+import sys, os
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
 import numpy as np
 if not hasattr(np, 'bool8'):
     np.bool8 = np.bool_
@@ -70,8 +73,11 @@ try:
     from src.model import SiameseUNetAttention
     from src.inference import run_model_inference
     from src.post_process import process_detected_changes
-except ImportError:
+except ImportError as e:
+    import traceback
     print("Warning: Manual mode src modules not found. Ensure src directory is accessible.")
+    print(f"❌ ACTUAL ERROR: {e}")
+    traceback.print_exc()
 
 try:
     from vlm_blueprint import vlm_bp
@@ -89,14 +95,16 @@ if vlm_bp:
 app.config['LATEST_SCAN_METADATA'] = {}
 app.config['LATEST_VLM_CONTEXT'] = {}
 
-SAVE_DIR = os.path.abspath("saved_images")
-os.makedirs(SAVE_DIR, exist_ok=True)
+BASE_DIR = os.path.abspath(os.path.dirname(__file__))
 
-UPLOAD_FOLDER = os.path.abspath("uploads")
+
+SAVE_DIR = os.path.abspath(os.path.join(BASE_DIR, "saved_images"))
+os.makedirs(SAVE_DIR, exist_ok=True)
+UPLOAD_FOLDER = os.path.abspath(os.path.join(BASE_DIR, "uploads"))
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 
-MODEL_DIR = os.path.abspath("model")
+MODEL_DIR = os.path.abspath(os.path.join(BASE_DIR, "model"))
 os.makedirs(MODEL_DIR, exist_ok=True)
 MODEL_PATH = os.path.join(MODEL_DIR, 'best_siamese_model.pth')
 GOOGLE_DRIVE_FILE_ID = "1vaNaT8FkHY-ysYwJWhyoEVOw6A7_vPq-"
@@ -135,7 +143,11 @@ except Exception as e:
     print(f"⚠️ Model Initialization Error: {e}")
 
 latest_events = []
-client = Groq()
+try:
+    client = Groq()
+except Exception as e:
+    print(f"⚠️ Groq client not initialized (chat copilot will be disabled): {e}")
+    client = None
 
 # -------------------------------------------------------------------
 # NATIVE GEOTIFF / 16-BIT MULTISPECTRAL HANDLER

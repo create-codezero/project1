@@ -41,6 +41,18 @@ def predict_change_mask(
     img_a_np = np.array(raw_a)
     img_b_np = np.array(raw_b)
 
+    # BUG FIX: T1 and T2 images can arrive with different dimensions
+    # (e.g. two different uploaded files, or two different satellite
+    # scenes). Albumentations' twin-target transform requires both images
+    # to have the exact same height/width, so we resize B onto A's grid
+    # before handing them to the transform, instead of crashing with a
+    # ValueError.
+    if img_b_np.shape[:2] != img_a_np.shape[:2]:
+        img_b_np = cv2.resize(
+            img_b_np, (img_a_np.shape[1], img_a_np.shape[0]),
+            interpolation=cv2.INTER_LINEAR
+        )
+
     # Preprocess both images using Albumentations twin target
     augmented = transform(image=img_a_np, image_b=img_b_np)
     tensor_a = augmented['image'].unsqueeze(0).to(device)

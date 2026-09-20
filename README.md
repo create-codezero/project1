@@ -1,7 +1,8 @@
-```markdown
 # 🛰️ SatQuery AI (Bhoomidristi) - Geospatial Copilot
 
 An interactive, agentic vision-language assistant for multimodal remote-sensing image analysis through natural-language queries. Built for the Indian Space Research Organisation (ISRO) / Space Applications Centre (SAC) evaluation benchmarks and AI challenges.
+
+<img style="width=100%;" src="architecture_diagram.png" />
 
 ---
 
@@ -54,7 +55,7 @@ project/
 ### 2. Clone and Install Dependencies
 
 ```bash
-git clone [https://github.com/your-username/satquery-ai.git](https://github.com/your-username/satquery-ai.git)
+git clone [https://github.com/owner-username/satquery-ai.git](https://github.com/your-username/satquery-ai.git)
 cd satquery-ai
 pip install -r requirements.txt
 

@@ -4,6 +4,7 @@ import io
 import base64
 import threading
 from pathlib import Path
+import requests
 
 import numpy as np
 import cv2
@@ -26,6 +27,11 @@ ADAPTER_PATH = os.getenv(
     "SATQUERY_ADAPTER",
     r"F:\single-data\satquery_paligemma_lora_4gpu_1k\checkpoint-2400",
 )
+
+# Remote Colab-hosted VLM server (used when the local machine has no GPU).
+# If this env var is set, /predict forwards requests there instead of
+# trying to load the 3B model locally.
+REMOTE_VLM_URL = os.getenv("SATQUERY_VLM_REMOTE_URL", "").rstrip("/")
 
 DEVICE = "cuda:0"
 MAX_NEW_TOKENS = int(os.getenv("SATQUERY_MAX_NEW_TOKENS", "128"))
@@ -236,6 +242,8 @@ def health():
         import torch
         return jsonify({
             "status": "ok",
+            "mode": "remote" if REMOTE_VLM_URL else "local",
+            "remote_url": REMOTE_VLM_URL or None,
             "cuda": torch.cuda.is_available(),
             "gpu": torch.cuda.get_device_name(0) if torch.cuda.is_available() else None,
             "adapter": ADAPTER_PATH,
@@ -247,6 +255,28 @@ def health():
 
 @vlm_bp.route("/predict", methods=["POST"])
 def predict():
+    # ---- REMOTE MODE: forward to Colab GPU server ----
+    if REMOTE_VLM_URL:
+        try:
+            if "image" not in request.files:
+                return jsonify({"error": "No image uploaded."}), 400
+            file = request.files["image"]
+            prompt = request.form.get("prompt", "").strip()
+            if not prompt:
+                return jsonify({"error": "Please enter a prompt."}), 400
+
+            resp = requests.post(
+                f"{REMOTE_VLM_URL}/predict",
+                files={"image": (file.filename, file.stream, file.mimetype)},
+                data={"prompt": prompt},
+                timeout=120,
+            )
+            return jsonify(resp.json()), resp.status_code
+        except Exception as exc:
+            import traceback; traceback.print_exc()
+            return jsonify({"success": False, "error": f"Could not reach Colab VLM server: {exc}"}), 500
+
+    # ---- LOCAL MODE: original behavior (needs local GPU) ----
     try:
         if "image" not in request.files:
             return jsonify({"error": "No image uploaded."}), 400
@@ -259,10 +289,8 @@ def predict():
         if not prompt:
             return jsonify({"error": "Please enter a prompt."}), 400
 
-        # Safe image loading supporting 16-bit GeoTIFF and standard web formats
         image = load_uploaded_image(file)
 
-        # Serialize GPU requests
         with _model_lock:
             clean_text, raw_text = generate_answer(image, prompt)
 

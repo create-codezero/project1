@@ -1,3 +1,6 @@
+import sys, os
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
 import numpy as np
 if not hasattr(np, 'bool8'):
     np.bool8 = np.bool_
@@ -70,8 +73,11 @@ try:
     from src.model import SiameseUNetAttention
     from src.inference import run_model_inference
     from src.post_process import process_detected_changes
-except ImportError:
+except ImportError as e:
+    import traceback
     print("Warning: Manual mode src modules not found. Ensure src directory is accessible.")
+    print(f"❌ ACTUAL ERROR: {e}")
+    traceback.print_exc()
 
 try:
     from vlm_blueprint import vlm_bp
@@ -89,14 +95,16 @@ if vlm_bp:
 app.config['LATEST_SCAN_METADATA'] = {}
 app.config['LATEST_VLM_CONTEXT'] = {}
 
-SAVE_DIR = os.path.abspath("saved_images")
-os.makedirs(SAVE_DIR, exist_ok=True)
+BASE_DIR = os.path.abspath(os.path.dirname(__file__))
 
-UPLOAD_FOLDER = os.path.abspath("uploads")
+
+SAVE_DIR = os.path.abspath(os.path.join(BASE_DIR, "saved_images"))
+os.makedirs(SAVE_DIR, exist_ok=True)
+UPLOAD_FOLDER = os.path.abspath(os.path.join(BASE_DIR, "uploads"))
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 
-MODEL_DIR = os.path.abspath("model")
+MODEL_DIR = os.path.abspath(os.path.join(BASE_DIR, "model"))
 os.makedirs(MODEL_DIR, exist_ok=True)
 MODEL_PATH = os.path.join(MODEL_DIR, 'best_siamese_model.pth')
 GOOGLE_DRIVE_FILE_ID = "1vaNaT8FkHY-ysYwJWhyoEVOw6A7_vPq-"
@@ -135,7 +143,11 @@ except Exception as e:
     print(f"⚠️ Model Initialization Error: {e}")
 
 latest_events = []
-client = Groq()
+try:
+    client = Groq()
+except Exception as e:
+    print(f"⚠️ Groq client not initialized (chat copilot will be disabled): {e}")
+    client = None
 
 # -------------------------------------------------------------------
 # NATIVE GEOTIFF / 16-BIT MULTISPECTRAL HANDLER
@@ -179,6 +191,54 @@ def calculate_ndvi(nir, red):
 
 def calculate_rvi(vv, vh):
     return (4 * vh) / (vv + vh + 1e-5)
+
+
+# -------------------------------------------------------------------
+# CONFIDENCE FIX
+# ---------------------------------------------------------------
+# These two functions replace the old area-based confidence formulas
+# (e.g. `65 + area_pixels / 10`), which scored bigger detected blobs as
+# more "confident" regardless of how sure the model actually was.
+# They instead derive confidence from real signal: the model's own
+# sigmoid probability for optical/fusion detections, and the actual SAR
+# backscatter change strength for SAR-only detections (which have no
+# learned model probability behind them).
+# -------------------------------------------------------------------
+def compute_region_confidence(model_probs, region_mask, floor=50.0, ceiling=99.0):
+    """
+    Real model-confidence: mean of the model's own sigmoid probability (0-1)
+    inside the detected region, rescaled to a 0-100 display range.
+    """
+    if model_probs is None:
+        return None
+    try:
+        region_probs = model_probs[region_mask == 255]
+        if region_probs.size == 0:
+            return None
+        mean_prob = float(np.mean(region_probs))
+        scaled = floor + mean_prob * (ceiling - floor)
+        return round(float(np.clip(scaled, floor, ceiling)), 1)
+    except Exception:
+        return None
+
+
+def compute_sar_change_confidence(combined_change_map, region_mask, floor=50.0, ceiling=95.0):
+    """
+    For SAR-only detections: scales confidence off how strong the actual
+    backscatter change signal is within the region, normalized against the
+    scene's own change distribution, rather than off blob area.
+    """
+    try:
+        region_vals = combined_change_map[region_mask == 255]
+        if region_vals.size == 0:
+            return None
+        scene_max = float(np.percentile(combined_change_map, 99)) + 1e-6
+        strength = float(np.clip(np.mean(region_vals) / scene_max, 0.0, 1.0))
+        scaled = floor + strength * (ceiling - floor)
+        return round(float(np.clip(scaled, floor, ceiling)), 1)
+    except Exception:
+        return None
+
 
 def pixel_to_latlon(x, y, transform):
     lon, lat = transform * (x, y)
@@ -304,7 +364,7 @@ def fetch_optimized_sar(bbox, date_range, label="sar_image"):
 
     return pseudo_rgb, vv_filtered, vh_filtered, transform
 
-def generate_sar_change_mask(t1_vv, t1_vh, t2_vv, t2_vh):
+def generate_sar_change_mask(t1_vv, t1_vh, t2_vv, t2_vh, return_change_map=False):
     ratio_vv = np.abs(10 * np.log10(t2_vv / t1_vv))
     ratio_vh = np.abs(10 * np.log10(t2_vh / t1_vh))
     combined_change = (ratio_vv + ratio_vh) / 2.0
@@ -315,6 +375,8 @@ def generate_sar_change_mask(t1_vv, t1_vh, t2_vv, t2_vh):
     kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+    if return_change_map:
+        return mask, combined_change
     return mask
 
 @app.after_request
@@ -406,7 +468,7 @@ def detect_satellite():
             Image.fromarray(t1_rgb).save(sat_t1_path)
             Image.fromarray(t2_rgb).save(sat_t2_path)
 
-            run_model_inference(model, sat_t1_path, sat_t2_path, sat_mask_path, device=DEVICE)
+            _, model_probs = run_model_inference(model, sat_t1_path, sat_t2_path, sat_mask_path, device=DEVICE)
             mask_img = cv2.imread(sat_mask_path, cv2.IMREAD_GRAYSCALE)
             
             cloud_mask = np.isin(t1_scl, [3, 8, 9, 10]) | np.isin(t2_scl, [3, 8, 9, 10])
@@ -439,7 +501,7 @@ def detect_satellite():
                 events.append({
                     "id": event_id, "lat": lat, "lon": lon, "activity_type": activity,
                     "severity": "HIGH" if area_sq_m > 5000 else "MEDIUM",
-                    "confidence": round(float(np.min([98.5, 65.0 + (area_pixels / 10.0)])), 1),
+                    "confidence": compute_region_confidence(model_probs, c_mask),
                     "area_sq_m": area_sq_m,
                     "t1_patch": crop_to_base64(t1_rgb, [x, y, w, h]), "t2_patch": crop_to_base64(t2_rgb, [x, y, w, h]),
                     "geometry": contour_to_geojson_polygon(cnt, transform)
@@ -455,7 +517,7 @@ def detect_satellite():
                 t2_vh = cv2.resize(t2_vh, (t1_vh.shape[1], t1_vh.shape[0]))
                 t2_pseudo = cv2.resize(t2_pseudo, (t1_pseudo.shape[1], t1_pseudo.shape[0]))
 
-            mask_img = generate_sar_change_mask(t1_vv, t1_vh, t2_vv, t2_vh)
+            mask_img, sar_change_map = generate_sar_change_mask(t1_vv, t1_vh, t2_vv, t2_vh, return_change_map=True)
             Image.fromarray(mask_img).save(sat_mask_path)
             contours, _ = cv2.findContours(mask_img, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             t1_annotated, t2_annotated = t1_pseudo.copy(), t2_pseudo.copy()
@@ -481,7 +543,7 @@ def detect_satellite():
                 events.append({
                     "id": event_id, "lat": lat, "lon": lon, "activity_type": activity,
                     "severity": "HIGH" if area_sq_m > 5000 else "MEDIUM",
-                    "confidence": round(float(np.min([96.0, 70.0 + (area_pixels / 8.0)])), 1),
+                    "confidence": compute_sar_change_confidence(sar_change_map, c_mask),
                     "area_sq_m": area_sq_m,
                     "t1_patch": crop_to_base64(t1_pseudo, [x, y, w, h]), "t2_patch": crop_to_base64(t2_pseudo, [x, y, w, h]),
                     "geometry": contour_to_geojson_polygon(cnt, transform)
@@ -510,14 +572,14 @@ def detect_satellite():
             sat_t2_path = os.path.join(SAVE_DIR, f"opt_t2_{timestamp}.png")
             Image.fromarray(t1_rgb).save(sat_t1_path)
             Image.fromarray(t2_rgb).save(sat_t2_path)
-            run_model_inference(model, sat_t1_path, sat_t2_path, sat_mask_path, device=DEVICE)
+            _, model_probs = run_model_inference(model, sat_t1_path, sat_t2_path, sat_mask_path, device=DEVICE)
             
             opt_mask = cv2.imread(sat_mask_path, cv2.IMREAD_GRAYSCALE)
             cloud_mask = np.isin(t1_scl, [3, 8, 9, 10]) | np.isin(t2_scl, [3, 8, 9, 10])
             opt_mask[cloud_mask] = 0
             _, opt_thresh = cv2.threshold(opt_mask, 127, 255, cv2.THRESH_BINARY)
             
-            sar_mask = generate_sar_change_mask(t1_vv, t1_vh, t2_vv, t2_vh)
+            sar_mask, sar_change_map = generate_sar_change_mask(t1_vv, t1_vh, t2_vv, t2_vh, return_change_map=True)
 
             fusion_mask = cv2.bitwise_or(opt_thresh, sar_mask)
             kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
@@ -551,15 +613,20 @@ def detect_satellite():
                 lat, lon = pixel_to_latlon(x + w // 2, y + h // 2, transform)
                 area_sq_m = int(area_pixels * 100)
 
-                base_conf = 70.0 + (area_pixels / 10.0)
+                # Real confidence: blend the model's own probability (optical
+                # branch) with the SAR change-signal strength (SAR branch),
+                # instead of the old base_conf = 70 + area/10 formula.
+                opt_conf = compute_region_confidence(model_probs, c_mask) or 50.0
+                sar_conf = compute_sar_change_confidence(sar_change_map, c_mask) or 50.0
+
                 if opt_overlap > 0.3 and sar_overlap > 0.3:
-                    conf, box_color = base_conf + 18.0, (255, 0, 255)
+                    conf, box_color = min(99.0, max(opt_conf, sar_conf) + 8.0), (255, 0, 255)
                 elif sar_overlap > 0.3 and under_cloud:
-                    conf, box_color = base_conf + 12.0, (0, 255, 255)
+                    conf, box_color = sar_conf, (0, 255, 255)
                 elif opt_overlap > 0.3:
-                    conf, box_color = base_conf, (255, 0, 0)
+                    conf, box_color = opt_conf, (255, 0, 0)
                 elif sar_overlap > 0.3:
-                    conf, box_color = base_conf - 5.0, (0, 255, 255)
+                    conf, box_color = max(50.0, sar_conf - 5.0), (0, 255, 255)
                 else:
                     continue
 

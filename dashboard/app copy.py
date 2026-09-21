@@ -42,9 +42,12 @@ try:
     from src.model import SiameseUNetAttention
     from src.inference import run_model_inference
     from src.post_process import process_detected_changes
-except ImportError:
+except ImportError as e:
+    import traceback
     print("Warning: Manual mode src modules not found. Ensure src directory is accessible.")
-
+    print(f"❌ ACTUAL ERROR: {e}")
+    traceback.print_exc()
+    
 app = Flask(__name__, template_folder='templates')
 
 # --- DIRECTORIES SETUP ---

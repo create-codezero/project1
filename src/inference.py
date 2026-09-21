@@ -41,12 +41,6 @@ def predict_change_mask(
     img_a_np = np.array(raw_a)
     img_b_np = np.array(raw_b)
 
-    # BUG FIX: T1 and T2 images can arrive with different dimensions
-    # (e.g. two different uploaded files, or two different satellite
-    # scenes). Albumentations' twin-target transform requires both images
-    # to have the exact same height/width, so we resize B onto A's grid
-    # before handing them to the transform, instead of crashing with a
-    # ValueError.
     if img_b_np.shape[:2] != img_a_np.shape[:2]:
         img_b_np = cv2.resize(
             img_b_np, (img_a_np.shape[1], img_a_np.shape[0]),
@@ -71,14 +65,25 @@ def predict_change_mask(
     return img_b_np, binary_mask, probs
 
 
-def run_model_inference(model, t1_path, t2_path, output_mask_path, device="cuda", threshold=0.5):
+def run_model_inference(model, t1_path, t2_path, output_mask_path, device="cuda", threshold=0.5,
+                         probs_output_path=None):
     """
-    Wrapper function called directly by the Flask backend app.py
+    Wrapper function called directly by the Flask backend app.py.
+
+    CONFIDENCE FIX: this used to throw away the model's per-pixel sigmoid
+    probabilities and only keep the thresholded binary mask — that's why
+    app.py had no real model confidence to report and fell back to a fake
+    area-based formula (bigger blob = higher confidence, regardless of how
+    sure the model actually was). Now it also returns the raw probability
+    map so app.py can compute genuine per-detection confidence by averaging
+    the model's own probabilities inside each detected region.
     """
     dev = torch.device(device if torch.cuda.is_available() or device == "cpu" else "cpu")
-    _, binary_mask, _ = predict_change_mask(model, t1_path, t2_path, dev, threshold)
+    _, binary_mask, probs = predict_change_mask(model, t1_path, t2_path, dev, threshold)
     cv2.imwrite(output_mask_path, binary_mask)
-    return output_mask_path
+    if probs_output_path:
+        np.save(probs_output_path, probs.astype(np.float32))
+    return output_mask_path, probs
 
 
 def create_overlay_heatmap(img_b_rgb: np.ndarray, binary_mask: np.ndarray) -> np.ndarray:
